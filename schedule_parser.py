@@ -1,6 +1,25 @@
 import re
-import time
-from collections import defaultdict
+
+def escape_markdown(text):
+    """Экранирует специальные символы MarkdownV2"""
+    if not text:
+        return ""
+    
+    # Список всех специальных символов в MarkdownV2
+    # которые нужно экранировать
+    escape_chars = [
+        '_', '*', '[', ']', '(', ')', '~', 
+        '`', '>', '#', '+', '-', '=', '|', 
+        '{', '}', '.', '!'
+    ]
+    
+    result = str(text)
+    
+    # Экранируем каждый символ
+    for char in escape_chars:
+        result = result.replace(char, f'\\{char}')
+    
+    return result
 
 def read_schedule_file():
     """Читает файл расписания"""
@@ -10,763 +29,509 @@ def read_schedule_file():
     except FileNotFoundError:
         return []
 
-lines = read_schedule_file()
+def normalize_name(name):
+    """Нормализует имя (для класса или фамилии учителя)"""
+    if not name:
+        return ""
+    return re.sub(r'\s+', '', name.strip().upper())
 
-# Кэши для производительности
-_teacher_index_cache = None
-_teacher_index_cache_time = None
-_document_structure_cache = None
-_document_structure_cache_time = None
-CACHE_TIMEOUT = 300  # 5 минут
+# ====== БАЗОВЫЕ ФУНКЦИИ ДЛЯ ПАРСИНГА ======
 
-def normalize_class_name(class_name):
-    """Нормализует название класса"""
-    normalized = class_name.replace(" ", "")
-    normalized = normalized.upper()
-    return normalized
+def split_by_slash(value):
+    """Разбивает строку по слэшам"""
+    if not value:
+        return []
+    parts = re.split(r'[\\\/]', value)
+    return [part.strip() for part in parts if part.strip()]
 
-def parse_document_structure():
-    """
-    Простой и надежный анализ структуры документа
-    """
-    structure = []
-    current_day = None
-    current_sections = []
+def find_schedule_headers():
+    """Находит все заголовки расписаний в файле"""
+    lines = read_schedule_file()
+    headers = []
     
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        line_upper = line.upper()
-        
-        # Ищем день недели
-        days = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА']
-        found_day = None
-        for day in days:
-            if day in line_upper:
-                found_day = day
-                break
-        
-        if found_day:
-            # Сохраняем предыдущий день если есть
-            if current_day and current_sections:
-                structure.append({
-                    'day': current_day,
-                    'sections': current_sections.copy()
+    for line_num, line in enumerate(lines):
+        line_upper = line.strip().upper()
+        if 'РАСПИСАНИЕ НА' in line_upper:
+            day_match = re.search(r'РАСПИСАНИЕ НА\s+(\w+)', line_upper)
+            if day_match:
+                day = day_match.group(1)
+                headers.append({
+                    'line_num': line_num,
+                    'day': day,
+                    'raw_line': line.strip()
                 })
-            
-            # Начинаем новый день
-            current_day = found_day
-            current_sections = []
-            i += 1
-            continue
-        
-        # Ищем начало таблицы с расписанием (строка с "ВРЕМЯ")
-        if 'ВРЕМЯ' in line_upper and ',' in line:
-            table_start = i
-            
-            # Определяем тип смены
-            # Проверяем, есть ли "ВТОРАЯ СМЕНА" выше
-            shift_type = '1_смена'
-            for j in range(max(0, i-10), i):
-                if 'ВТОРАЯ СМЕНА' in lines[j].upper():
-                    shift_type = '2_смена'
-                    break
-            
-            # Ищем конец таблицы
-            table_end = i
-            for j in range(i+1, min(i+100, len(lines))):
-                next_line = lines[j].strip()
-                next_upper = next_line.upper()
-                
-                # Таблица заканчивается если:
-                # 1. Пустая строка после нескольких строк таблицы
-                # 2. Начинается новый день
-                # 3. Еще одно "ВРЕМЯ" (новая таблица)
-                if not next_line:
-                    # Проверяем, не начало ли это нового раздела
-                    if j < len(lines) - 1:
-                        next_next = lines[j+1].strip().upper()
-                        if 'ВРЕМЯ' in next_next or any(day in next_next for day in days):
-                            table_end = j - 1
-                            break
-                elif 'ВРЕМЯ' in next_upper and j > i + 5:
-                    table_end = j - 1
-                    break
-                elif any(day in next_upper for day in days):
-                    table_end = j - 1
-                    break
-                elif j == min(i+100, len(lines)) - 1:
-                    table_end = j
-            
-            if table_end > table_start:
-                current_sections.append({
-                    'type': shift_type,
-                    'start_line': table_start,
-                    'end_line': table_end
-                })
-                
-                i = table_end + 1
-                continue
-        
-        i += 1
     
-    # Сохраняем последний день
-    if current_day and current_sections:
-        structure.append({
-            'day': current_day,
-            'sections': current_sections
-        })
+    headers.append({
+        'line_num': len(lines),
+        'day': 'КОНЕЦ_ФАЙЛА',
+        'raw_line': ''
+    })
     
-    return structure
+    return headers
 
-def get_cached_document_structure():
-    """Получает закешированную структуру документа"""
-    global _document_structure_cache, _document_structure_cache_time
-    
-    current_time = time.time()
-    
-    if (_document_structure_cache is None or 
-        _document_structure_cache_time is None or 
-        current_time - _document_structure_cache_time > CACHE_TIMEOUT):
-        
-        _document_structure_cache = parse_document_structure()
-        _document_structure_cache_time = current_time
-        
-        print(f"✅ Создана структура документа: {len(_document_structure_cache)} дней")
-        for day_struct in _document_structure_cache:
-            print(f"  День: {day_struct['day']}, секций: {len(day_struct['sections'])}")
-            for section in day_struct['sections']:
-                print(f"    {section['type']}: строки {section['start_line']}-{section['end_line']}")
-    
-    return _document_structure_cache
+def get_day_for_line(line_num, headers):
+    """Определяет день недели для строки"""
+    for i in range(len(headers) - 1):
+        if headers[i]['line_num'] <= line_num < headers[i+1]['line_num']:
+            return headers[i]['day']
+    return 'НЕИЗВЕСТНО'
 
-def get_context_for_line(line_num):
-    """
-    Определяет контекст для строки: день и смена
-    """
-    structure = get_cached_document_structure()
-    
-    if not structure:
-        return {'day': 'Неизвестно', 'shift': 'Неизвестно'}
-    
-    for day_struct in structure:
-        for section in day_struct['sections']:
-            if section['start_line'] <= line_num <= section['end_line']:
-                return {
-                    'day': day_struct['day'],
-                    'shift': section['type']
-                }
-    
-    return {'day': 'Неизвестно', 'shift': 'Неизвестно'}
+# ====== ПОИСК КЛАССОВ ======
 
-def find_all_class_positions(class_name):
-    """
-    Находит ВСЕ позиции класса в файле
-    """
-    normalized_target = normalize_class_name(class_name)
+def find_class_positions(class_name):
+    """Находит все позиции класса в файле"""
+    normalized_target = normalize_name(class_name)
+    lines = read_schedule_file()
+    headers = find_schedule_headers()
     positions = []
     
     for line_num, line in enumerate(lines):
         cells = line.strip().split(',')
         for col_num, cell in enumerate(cells):
-            cell_normalized = normalize_class_name(cell)
-            if normalized_target == cell_normalized:
-                context = get_context_for_line(line_num)
-                positions.append({
-                    'line_num': line_num,
-                    'col_num': col_num,
-                    'class_name': cell.strip(),
-                    'context': context
-                })
+            cell_clean = cell.strip()
+            if re.match(r'^\d+\s*[А-ЯA-Z](\s*[А-ЯA-Z])?$', cell_clean, re.IGNORECASE):
+                if normalize_name(cell_clean) == normalized_target:
+                    day = get_day_for_line(line_num, headers)
+                    positions.append({
+                        'line_num': line_num,
+                        'col_num': col_num,
+                        'class_name': cell_clean,
+                        'day': day
+                    })
     
     return positions
 
-def get_lessons_for_class_at_position(position):
-    """
-    Получает уроки для класса в конкретной позиции
-    """
-    line_num = position['line_num']
-    col_num = position['col_num']
-    context = position['context']
+def get_lessons_for_position(position):
+    """Получает уроки для класса в конкретной позиции"""
+    lines = read_schedule_file()
     lessons = []
     
-    # Получаем границы текущей секции
-    section_end = len(lines) - 1
-    structure = get_cached_document_structure()
-    for day_struct in structure:
-        for section in day_struct['sections']:
-            if section['start_line'] <= line_num <= section['end_line']:
-                section_end = section['end_line']
-                break
+    line_num = position['line_num']
+    col_num = position['col_num']
+    headers = find_schedule_headers()
+    base_day = position['day']
     
-    # Ищем уроки ниже строки с классом
-    for check_line_num in range(line_num + 1, min(line_num + 50, section_end + 1)):
-        line = lines[check_line_num].strip()
+    i = line_num + 1
+    
+    while i < len(lines):
+        line = lines[i].strip()
         if not line:
+            i += 1
             continue
+        
+        # Проверяем, не началось ли новое расписание
+        current_day = get_day_for_line(i, headers)
+        if current_day != base_day:
+            break
         
         cells = line.split(',')
         
-        # Проверяем, это строка с временем урока?
-        if len(cells) > 1 and ('–' in cells[1] or '-' in cells[1]):
-            time_str = cells[1].strip()
-            
-            # Собираем данные урока из этой строки и соседних
-            data_parts = []
-            
-            for offset in range(-1, 2):
-                check_line_num2 = check_line_num + offset
-                if 0 <= check_line_num2 < len(lines):
-                    check_line = lines[check_line_num2].strip()
-                    if check_line:
-                        check_cells = check_line.split(',')
-                        if len(check_cells) > col_num:
-                            data = check_cells[col_num].strip()
-                            if data:
-                                data_parts.append(data)
-            
-            if data_parts:
-                lesson_info = {
-                    'time': time_str,
-                    'subject': data_parts[0] if len(data_parts) > 0 else '',
-                    'teacher': data_parts[1] if len(data_parts) > 1 else '',
-                    'classroom': data_parts[2] if len(data_parts) > 2 else '',
-                    'raw_data': data_parts,
-                    'context': context
-                }
-                lessons.append(lesson_info)
-        
-        # Если встречаем новую строку с классами - заканчиваем
-        if len(cells) > 1:
-            has_classes = False
-            for cell in cells:
-                if re.match(r'^\d+\s*[А-ЯA-Z]$', cell.strip(), re.IGNORECASE):
-                    has_classes = True
-                    break
-            
-            if has_classes and check_line_num > line_num + 2:
+        # Проверяем, не началась ли новая таблица с классами
+        has_new_classes = False
+        for cell in cells:
+            if re.match(r'^\d+\s*[А-ЯA-Z]', cell.strip(), re.IGNORECASE):
+                has_new_classes = True
                 break
+        
+        if has_new_classes:
+            break
+        
+        # Проверяем строку со временем
+        if len(cells) > 1:
+            time_cell = cells[1].strip() if len(cells) > 1 else ""
+            time_pattern = r'\d{1,2}\.\d{2}\s*[–\-]\s*\d{1,2}\.\d{2}'
+            time_match = re.search(time_pattern, time_cell)
+            
+            if time_match:
+                time_str = time_match.group(0)
+                subject = ""
+                teacher = ""
+                classroom = ""
+                
+                # Предмет из строки выше
+                if i - 1 >= 0:
+                    prev_line = lines[i-1].strip()
+                    prev_cells = prev_line.split(',')
+                    if col_num < len(prev_cells):
+                        subject = prev_cells[col_num].strip()
+                
+                # Учитель из текущей строки
+                if col_num < len(cells):
+                    teacher = cells[col_num].strip()
+                
+                # Кабинет из строки ниже
+                if i + 1 < len(lines):
+                    next_line = lines[i+1].strip()
+                    next_cells = next_line.split(',')
+                    if col_num < len(next_cells):
+                        classroom = next_cells[col_num].strip()
+                
+                if subject or teacher or classroom:
+                    lessons.append({
+                        'time': time_str,
+                        'subject': subject,
+                        'teacher': teacher,
+                        'classroom': classroom,
+                        'class_name': position['class_name'],
+                        'day': base_day
+                    })
+                
+                i += 2
+                continue
+        
+        i += 1
     
     return lessons
 
-def get_schedule_for_class_all_positions(class_name):
-    """
-    Получает расписание для класса из всех позиций
-    """
-    positions = find_all_class_positions(class_name)
-    
+def get_schedule_for_class(class_name):
+    """Получает все расписания для класса"""
+    positions = find_class_positions(class_name)
     if not positions:
-        return None
+        return []
     
-    # Группируем уроки по контексту
-    grouped_lessons = defaultdict(list)
+    all_schedules = []
+    for pos in positions:
+        lessons = get_lessons_for_position(pos)
+        if lessons:
+            all_schedules.append({
+                'position_info': pos,
+                'lessons': lessons
+            })
     
-    for position in positions:
-        lessons = get_lessons_for_class_at_position(position)
-        
-        for lesson in lessons:
-            lesson['class_name'] = position['class_name']
-        
-        key = f"{position['context']['day']}_{position['context']['shift']}"
-        grouped_lessons[key].extend(lessons)
+    return all_schedules
+
+def format_class_schedule(class_name, schedules):
+    """Форматирует расписание класса для вывода"""
+    if not schedules:
+        escaped_class = escape_markdown(class_name)
+        return f"Расписание для класса {escaped_class} не найдено\\."
     
-    # Преобразуем в удобный формат
-    result = []
-    for context_key, lessons in grouped_lessons.items():
-        parts = context_key.split('_')
-        day = parts[0]
-        shift = parts[1] if len(parts) > 1 else 'Неизвестно'
-        
-        # Сортируем уроки по времени
-        sorted_lessons = sorted(lessons, key=lambda x: parse_time(x['time']))
-        
-        result.append({
-            'day': day,
-            'shift': shift,
-            'lessons': sorted_lessons,
-            'total_lessons': len(sorted_lessons)
-        })
+    escaped_class = escape_markdown(class_name)
+    result = f"📚 *Расписание для класса {escaped_class}:*\n\n"
     
-    # Сортируем: сначала 1 смена, потом 2 смена
-    result.sort(key=lambda x: (0 if x['shift'] == '1_смена' else 1, x['day']))
+    # Группируем по дням
+    schedules_by_day = {}
+    for schedule in schedules:
+        day = schedule['position_info']['day']
+        if day not in schedules_by_day:
+            schedules_by_day[day] = []
+        schedules_by_day[day].append(schedule)
+    
+    # Сортируем дни
+    day_order = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА']
+    sorted_days = sorted(schedules_by_day.keys(), 
+                        key=lambda x: day_order.index(x) if x in day_order else 999)
+    
+    for day in sorted_days:
+        day_schedules = schedules_by_day[day]
+        escaped_day = escape_markdown(day)
+        result += f"*{escaped_day}:*\n"
+        
+        for i, schedule_info in enumerate(day_schedules):
+            lessons = schedule_info['lessons']
+            
+            if len(day_schedules) > 1:
+                result += f"_{escape_markdown(f'Вариант {i+1}')}_\n"
+            
+            for lesson in lessons:
+                time_display = lesson['time'].replace('–', '-')
+                escaped_time = escape_markdown(time_display)
+                escaped_subject = escape_markdown(lesson['subject'])
+                lesson_str = f"`{escaped_time}` \\- {escaped_subject}"
+                
+                if lesson['teacher']:
+                    escaped_teacher = escape_markdown(lesson['teacher'])
+                    lesson_str += f" \\({escaped_teacher}\\)"
+                
+                if lesson['classroom'] and lesson['classroom'].upper() not in ['', 'ДЕНЬ САМОПОДГОТОВКИ']:
+                    escaped_classroom = escape_markdown(lesson['classroom'])
+                    lesson_str += f" каб\\. {escaped_classroom}"
+                
+                result += lesson_str + "\n"
+            
+            result += "\n"
     
     return result
 
-def create_teacher_schedule_index():
-    """
-    Создает индекс расписания по учителям
-    """
-    teacher_index = defaultdict(list)
+# ====== ПОИСК УЧИТЕЛЕЙ ======
+
+def get_all_lessons():
+    """Получает все уроки для всех классов"""
+    lines = read_schedule_file()
+    headers = find_schedule_headers()
+    all_lessons = []
     
-    # Сначала находим все строки с классами
+    # Сначала находим все классы
     class_positions = []
-    
     for line_num, line in enumerate(lines):
         cells = line.strip().split(',')
-        
         for col_num, cell in enumerate(cells):
             cell_clean = cell.strip()
-            if re.match(r'^\d+\s*[А-ЯA-Z]$', cell_clean, re.IGNORECASE):
-                context = get_context_for_line(line_num)
+            if re.match(r'^\d+\s*[А-ЯA-Z](\s*[А-ЯA-Z])?$', cell_clean, re.IGNORECASE):
+                day = get_day_for_line(line_num, headers)
                 class_positions.append({
                     'line_num': line_num,
                     'col_num': col_num,
                     'class_name': cell_clean,
-                    'context': context
+                    'day': day
                 })
     
-    # Для каждой позиции класса находим уроки
-    for position in class_positions:
-        lessons = get_lessons_for_class_at_position(position)
-        
+    # Для каждого класса получаем уроки
+    for pos in class_positions:
+        lessons = get_lessons_for_position(pos)
         for lesson in lessons:
-            if lesson.get('teacher'):
-                teacher_names_raw = lesson['teacher'].strip()
-                
-                # Обрабатываем нескольких учителей через слэш
-                if '/' in teacher_names_raw or '\\' in teacher_names_raw:
-                    teacher_names_clean = re.sub(r'[\\\/]+', '/', teacher_names_raw)
-                    individual_teachers = [t.strip() for t in teacher_names_clean.split('/') if t.strip()]
-                else:
-                    individual_teachers = [teacher_names_raw]
-                
-                # Добавляем урок для каждого учителя
-                for teacher_name in individual_teachers:
-                    if not teacher_name:
-                        continue
-                    
-                    lesson_info = {
-                        'time': lesson['time'],
-                        'subject': lesson.get('subject', ''),
-                        'classroom': lesson.get('classroom', ''),
-                        'class_name': position['class_name'],
-                        'day': position['context']['day'],
-                        'shift': position['context']['shift'],
-                        'raw_data': lesson.get('raw_data', []),
-                        'original_teacher_field': teacher_names_raw
-                    }
-                    
-                    teacher_index[teacher_name].append(lesson_info)
+            all_lessons.append(lesson)
     
-    return dict(teacher_index)
+    return all_lessons
 
-def get_cached_teacher_index():
-    """Получает закешированный индекс учителей"""
-    global _teacher_index_cache, _teacher_index_cache_time
+def get_teacher_schedule(teacher_name):
+    """Получает расписание для учителя"""
+    normalized_teacher = normalize_name(teacher_name)
+    all_lessons = get_all_lessons()
+    schedule_by_day = {}
     
-    current_time = time.time()
-    
-    if (_teacher_index_cache is None or 
-        _teacher_index_cache_time is None or 
-        current_time - _teacher_index_cache_time > CACHE_TIMEOUT):
+    for lesson in all_lessons:
+        teacher_field = lesson['teacher']
+        if not teacher_field:
+            continue
         
-        _teacher_index_cache = create_teacher_schedule_index()
-        _teacher_index_cache_time = current_time
-        print(f"✅ Создан индекс для {len(_teacher_index_cache)} учителей")
+        teacher_parts = split_by_slash(teacher_field)
+        teacher_index = -1
+        
+        # Ищем нашего учителя
+        for idx, part in enumerate(teacher_parts):
+            if normalize_name(part) == normalized_teacher:
+                teacher_index = idx
+                break
+        
+        if teacher_index >= 0:
+            # Нашли учителя, определяем кабинет
+            classroom_field = lesson['classroom']
+            classroom_for_teacher = ""
+            
+            if classroom_field:
+                classroom_parts = split_by_slash(classroom_field)
+                if len(classroom_parts) == len(teacher_parts):
+                    classroom_for_teacher = classroom_parts[teacher_index]
+                elif len(classroom_parts) == 1:
+                    classroom_for_teacher = classroom_parts[0]
+                elif classroom_parts:
+                    classroom_for_teacher = classroom_parts[0]
+            
+            # Создаем копию урока с правильным кабинетом
+            lesson_copy = lesson.copy()
+            lesson_copy['teacher'] = teacher_parts[teacher_index]
+            lesson_copy['classroom'] = classroom_for_teacher
+            
+            day = lesson['day']
+            if day not in schedule_by_day:
+                schedule_by_day[day] = []
+            schedule_by_day[day].append(lesson_copy)
     
-    return _teacher_index_cache
+    # Сортируем уроки внутри каждого дня по времени
+    for day in schedule_by_day:
+        schedule_by_day[day].sort(key=lambda x: parse_time(x['time']))
+    
+    return schedule_by_day
 
 def parse_time(time_str):
-    """Парсит время для сортировки"""
+    """Преобразует время в минуты для сортировки"""
     try:
-        # Извлекаем время начала
-        start_time = time_str.split('–')[0].split('-')[0].strip()
-        
-        if ':' in start_time:
-            hours, minutes = map(int, start_time.split(':'))
-            return hours * 60 + minutes
-        elif '.' in start_time:
+        start_time = time_str.split('–')[0].strip().split('-')[0].strip()
+        if '.' in start_time:
             hours, minutes = map(int, start_time.split('.'))
             return hours * 60 + minutes
+        elif ':' in start_time:
+            hours, minutes = map(int, start_time.split(':'))
+            return hours * 60 + minutes
         else:
-            lesson_number = int(start_time.split('.')[0])
-            return lesson_number * 45
+            return 0
     except:
         return 0
 
-def get_schedule_by_teacher(teacher_name):
-    """Получает расписание для конкретного учителя"""
-    teacher_index = get_cached_teacher_index()
+def format_teacher_schedule(teacher_name, schedule_by_day):
+    """Форматирует расписание учителя"""
+    if not schedule_by_day:
+        return f"Учитель *{escape_markdown(teacher_name)}* не найден в расписании\\."
     
-    # Поиск учителя
-    teacher_name_lower = teacher_name.lower()
+    result = f"👨‍🏫 *Расписание учителя {escape_markdown(teacher_name)}:*\n\n"
     
-    exact_matches = []
-    partial_matches = []
+    total_lessons = sum(len(lessons) for lessons in schedule_by_day.values())
+    result += f"📊 Всего уроков: {total_lessons}\n\n"
     
-    for teacher_key, lessons in teacher_index.items():
-        if teacher_name_lower == teacher_key.lower():
-            exact_matches.append({
-                'teacher': teacher_key,
-                'lessons': lessons,
-                'match_type': 'exact'
-            })
-        elif teacher_name_lower in teacher_key.lower():
-            partial_matches.append({
-                'teacher': teacher_key,
-                'lessons': lessons,
-                'match_type': 'partial'
-            })
+    # Сортируем дни
+    day_order = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА']
+    sorted_days = sorted(schedule_by_day.keys(), 
+                        key=lambda x: day_order.index(x) if x in day_order else 999)
     
-    # Используем точные или частичные совпадения
-    matches = exact_matches if exact_matches else partial_matches
-    
-    if not matches:
-        return None
-    
-    # Объединяем уроки
-    all_lessons = []
-    for match in matches:
-        all_lessons.extend(match['lessons'])
-    
-    # Удаляем дубликаты
-    seen = set()
-    unique_lessons = []
-    for lesson in all_lessons:
-        lesson_key = (
-            lesson.get('time', ''),
-            lesson.get('subject', ''),
-            lesson.get('class_name', ''),
-            lesson.get('classroom', ''),
-            lesson.get('day', ''),
-            lesson.get('shift', '')
-        )
+    for day in sorted_days:
+        lessons = schedule_by_day[day]
+        escaped_day = escape_markdown(day)
+        result += f"*{escaped_day}* \\({len(lessons)} уроков\\):\n"
         
-        if lesson_key not in seen:
-            seen.add(lesson_key)
-            unique_lessons.append(lesson)
-    
-    # Группируем уроки по дням и сменам
-    grouped_lessons = defaultdict(list)
-    for lesson in unique_lessons:
-        key = f"{lesson['day']}_{lesson['shift']}"
-        grouped_lessons[key].append(lesson)
-    
-    # Сортируем группы
-    groups = []
-    for key, lessons in grouped_lessons.items():
-        parts = key.split('_')
-        day = parts[0]
-        shift = parts[1] if len(parts) > 1 else 'Неизвестно'
+        # Группируем уроки по времени
+        lessons_by_time = {}
+        for lesson in lessons:
+            time = lesson['time']
+            if time not in lessons_by_time:
+                lessons_by_time[time] = []
+            lessons_by_time[time].append(lesson)
         
-        # Сортируем уроки по времени
-        sorted_lessons = sorted(lessons, key=lambda x: parse_time(x['time']))
+        # Сортируем времена
+        sorted_times = sorted(lessons_by_time.keys(), key=lambda x: parse_time(x))
         
-        groups.append({
-            'day': day,
-            'shift': shift,
-            'lessons': sorted_lessons,
-            'total_lessons': len(sorted_lessons)
-        })
-    
-    # Сортируем группы
-    groups.sort(key=lambda x: (
-        0 if x['shift'] == '1_смена' else 1,
-        x['day']
-    ))
-    
-    main_teacher_name = matches[0]['teacher'] if matches else teacher_name
-    
-    return {
-        'teacher': teacher_name,
-        'found_as': main_teacher_name,
-        'match_type': 'exact' if exact_matches else 'partial',
-        'groups': groups,
-        'total_lessons': len(unique_lessons)
-    }
-
-def search_teachers_by_substring(substring):
-    """Ищет учителей по подстроке в фамилии"""
-    teacher_index = get_cached_teacher_index()
-    substring_lower = substring.lower()
-    
-    matches = []
-    for teacher_name, lessons in teacher_index.items():
-        if substring_lower in teacher_name.lower() and lessons:
-            # Проверяем, не является ли это составным учителем
-            if '/' in teacher_name or '\\' in teacher_name:
-                individual_teachers = re.split(r'[\\\/]+', teacher_name)
-                main_teacher = individual_teachers[0].strip() if individual_teachers else teacher_name
-            else:
-                main_teacher = teacher_name
+        for time in sorted_times:
+            time_lessons = lessons_by_time[time]
+            time_display = time.replace('–', '-')
+            escaped_time = escape_markdown(time_display)
+            result += f"`{escaped_time}`:\n"
             
-            # Если уже есть этот учитель в результатах, объединяем уроки
-            existing_match = None
-            for match in matches:
-                if match['name'] == main_teacher:
-                    existing_match = match
-                    break
+            for lesson in time_lessons:
+                class_name = escape_markdown(lesson['class_name'])
+                subject = escape_markdown(lesson['subject'])
+                lesson_str = f"  \\- {class_name}: {subject}"
+                
+                if lesson['classroom'] and lesson['classroom'].upper() not in ['', 'ДЕНЬ САМОПОДГОТОВКИ']:
+                    classroom = escape_markdown(lesson['classroom'])
+                    lesson_str += f" \\(каб\\. {classroom}\\)"
+                
+                result += lesson_str + "\n"
             
-            if existing_match:
-                existing_match['lesson_count'] += len(lessons)
-            else:
-                matches.append({
-                    'name': main_teacher,
-                    'full_name': teacher_name,
-                    'lesson_count': len(lessons),
-                    'sample_lesson': lessons[0] if lessons else None,
-                    'is_combined': '/' in teacher_name or '\\' in teacher_name
-                })
-    
-    # Сортируем по количеству уроков
-    matches.sort(key=lambda x: x['lesson_count'], reverse=True)
-    
-    return matches
-
-# ====== ФУНКЦИИ ФОРМАТИРОВАНИЯ ======
-
-def escape_markdown(text):
-    """Экранирует специальные символы Markdown"""
-    if not text:
-        return ""
-    
-    # Экранируем символы, которые могут сломать Markdown
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    result = text
-    for char in special_chars:
-        result = result.replace(char, '\\' + char)
+            result += "\n"
+        
+        result += "\n"
     
     return result
 
-# Замените функции форматирования на эти:
+def search_teachers_by_substring(substring):
+    """Ищет учителей по части фамилии"""
+    normalized_substring = normalize_name(substring)
+    all_lessons = get_all_lessons()
+    found_teachers = set()
+    
+    for lesson in all_lessons:
+        teacher_field = lesson['teacher']
+        if not teacher_field:
+            continue
+        
+        teacher_parts = split_by_slash(teacher_field)
+        for part in teacher_parts:
+            if normalized_substring in normalize_name(part):
+                found_teachers.add(part)
+    
+    return sorted(list(found_teachers))
 
-def format_class_schedule_groups(class_name, groups):
-    """Форматирует расписание класса с несколькими группами"""
-    if not groups:
-        return f"📭 Нет уроков для класса {class_name}"
-    
-    message = f"📚 Расписание для класса {class_name}:\n\n"
-    
-    for group in groups:
-        shift_text = "1 смена" if group['shift'] == '1_смена' else "2 смена"
-        
-        message += f"{group['day']}, {shift_text}:\n"
-        
-        if not group['lessons']:
-            message += "  Нет уроков\n"
-        else:
-            for i, lesson in enumerate(group['lessons'], 1):
-                time_display = lesson['time'].replace('–', '-')
-                lesson_text = f"{i}. {time_display} - "
-                
-                if lesson['subject']:
-                    lesson_text += f"{lesson['subject']}"
-                
-                if lesson['teacher']:
-                    lesson_text += f" ({lesson['teacher']})"
-                
-                classroom = lesson.get('classroom', '')
-                if classroom and classroom.upper() not in ['ДИСТАНТ', 'дистант', 'ДИСТАНЦИОННО']:
-                    if '/' in classroom or '\\' in classroom:
-                        classroom_display = classroom.replace('\\', '/')
-                    else:
-                        classroom_display = classroom
-                    
-                    lesson_text += f" каб. {classroom_display}"
-                
-                message += f"  {lesson_text}\n"
-        
-        message += "\n"
-    
-    message += f"📊 Всего групп расписания: {len(groups)}"
-    
-    return message
+# ====== ПОИСК ПО КАБИНЕТУ ======
 
-def format_teacher_schedule(teacher_info):
-    """Форматирует расписание учителя"""
-    if not teacher_info:
-        return "❌ Учитель не найден"
+def get_room_schedule(room_number):
+    """Получает расписание для кабинета"""
+    normalized_room = normalize_name(room_number)
+    all_lessons = get_all_lessons()
+    schedule_by_day = {}
     
-    teacher_name = teacher_info['teacher']
-    groups = teacher_info.get('groups', [])
-    found_as = teacher_info.get('found_as', teacher_name)
-    
-    if not groups:
-        return f"📭 У учителя {teacher_name} нет уроков в расписании"
-    
-    message = f"👨‍🏫 Расписание учителя {teacher_name}:\n"
-    
-    # Добавляем информацию о том, как найден учитель
-    if teacher_info.get('match_type') == 'partial' and found_as != teacher_name:
-        message += f"(найдено как: {found_as})\n"
-    
-    message += "\n"
-    
-    for group in groups:
-        shift_text = "1 смена" if group['shift'] == '1_смена' else "2 смена"
+    for lesson in all_lessons:
+        classroom_field = lesson['classroom']
+        if not classroom_field:
+            continue
         
-        message += f"{group['day']}, {shift_text}:\n"
+        # Проверяем все части кабинета (могут быть через слэш)
+        classroom_parts = split_by_slash(classroom_field)
+        classroom_found = False
         
-        if not group['lessons']:
-            message += "  Нет уроков\n"
-        else:
-            for i, lesson in enumerate(group['lessons'], 1):
-                time_display = lesson['time'].replace('–', '-')
-                lesson_text = f"{i}. {time_display} - "
+        for part in classroom_parts:
+            if normalize_name(part) == normalized_room:
+                classroom_found = True
+                break
+        
+        if classroom_found:
+            day = lesson['day']
+            if day not in schedule_by_day:
+                schedule_by_day[day] = []
+            
+            # Создаем копию урока с информацией
+            lesson_copy = lesson.copy()
+            schedule_by_day[day].append(lesson_copy)
+    
+    # Сортируем уроки внутри каждого дня по времени
+    for day in schedule_by_day:
+        schedule_by_day[day].sort(key=lambda x: parse_time(x['time']))
+    
+    return schedule_by_day
+
+def format_room_schedule(room_number, schedule_by_day):
+    """Форматирует расписание кабинета"""
+    if not schedule_by_day:
+        return f"Кабинет *{escape_markdown(room_number)}* не найден в расписании\\."
+    
+    result = f"🏫 *Расписание кабинета {escape_markdown(room_number)}:*\n\n"
+    
+    total_lessons = sum(len(lessons) for lessons in schedule_by_day.values())
+    result += f"📊 Всего уроков: {total_lessons}\n\n"
+    
+    # Сортируем дни
+    day_order = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА']
+    sorted_days = sorted(schedule_by_day.keys(), 
+                        key=lambda x: day_order.index(x) if x in day_order else 999)
+    
+    for day in sorted_days:
+        lessons = schedule_by_day[day]
+        escaped_day = escape_markdown(day)
+        result += f"*{escaped_day}* \\({len(lessons)} уроков\\):\n"
+        
+        # Группируем уроки по времени
+        lessons_by_time = {}
+        for lesson in lessons:
+            time = lesson['time']
+            if time not in lessons_by_time:
+                lessons_by_time[time] = []
+            lessons_by_time[time].append(lesson)
+        
+        # Сортируем времена
+        sorted_times = sorted(lessons_by_time.keys(), key=lambda x: parse_time(x))
+        
+        for time in sorted_times:
+            time_lessons = lessons_by_time[time]
+            time_display = time.replace('–', '-')
+            escaped_time = escape_markdown(time_display)
+            result += f"`{escaped_time}`:\n"
+            
+            for lesson in time_lessons:
+                class_name = escape_markdown(lesson['class_name'])
+                subject = escape_markdown(lesson['subject'])
+                teacher = escape_markdown(lesson['teacher']) if lesson['teacher'] else ""
+                classroom = escape_markdown(lesson['classroom']) if lesson['classroom'] else ""
                 
-                if lesson['subject']:
-                    lesson_text += f"{lesson['subject']}"
+                lesson_str = f"  \\- {class_name}: {subject}"
                 
-                if lesson['class_name']:
-                    lesson_text += f" ({lesson['class_name']})"
+                if teacher:
+                    lesson_str += f" \\({teacher}\\)"
                 
-                classroom = lesson.get('classroom', '')
-                if classroom and classroom.upper() not in ['ДИСТАНТ', 'дистант', 'ДИСТАНЦИОННО']:
-                    if '/' in classroom or '\\' in classroom:
-                        classroom_display = classroom.replace('\\', '/')
-                    else:
-                        classroom_display = classroom
-                    
-                    lesson_text += f" каб. {classroom_display}"
-                
-                message += f"  {lesson_text}\n"
+                result += lesson_str + "\n"
+            
+            result += "\n"
         
-        message += "\n"
+        result += "\n"
     
-    message += f"📊 Всего уроков: {teacher_info['total_lessons']}"
-    
-    return message
+    return result
 
-def format_teachers_search_results(matches, search_query):
-    """Форматирует результаты поиска учителей"""
-    if not matches:
-        return f"❌ Учителя с фамилией содержащей '{search_query}' не найдены."
-    
-    message = f"🔍 Найдено учителей ({len(matches)}):\n\n"
-    
-    for i, match in enumerate(matches[:15], 1):
-        lesson_sample = match['sample_lesson']
-        sample_info = ""
-        
-        if lesson_sample:
-            if lesson_sample.get('subject'):
-                subject = lesson_sample['subject'][:20] + ('...' if len(lesson_sample['subject']) > 20 else '')
-                sample_info = f" - {subject}"
-            if lesson_sample.get('class_name'):
-                sample_info += f" ({lesson_sample['class_name']})"
-        
-        # Добавляем отметку о составном учителе
-        teacher_display = match['name']
-        if match.get('is_combined', False) and match['full_name'] != match['name']:
-            teacher_display += f" ({match['full_name'].replace('/', '/')})"
-        
-        message += f"{i}. {teacher_display} - {match['lesson_count']} уроков{sample_info}\n"
-    
-    if len(matches) > 15:
-        message += f"\n... и еще {len(matches) - 15}"
-    
-    message += "\n\n💡 Используйте /teacher <фамилия> для подробного расписания"
-    
-    return message
-
-# ====== СТАРЫЕ ФУНКЦИИ (для обратной совместимости) ======
-
-def find_class_position(class_name):
-    """Находит позицию класса в файле (старая функция)"""
-    normalized_target = normalize_class_name(class_name)
-    
-    for line_num, line in enumerate(lines):
-        cells = line.strip().split(',')
-        for i, cell in enumerate(cells):
-            cell_normalized = normalize_class_name(cell)
-            if normalized_target == cell_normalized:
-                return i, line_num
-    return -1, -1
-
-def get_schedule_for_class(class_name):
-    """Получает расписание для класса (старая функция)"""
-    # Используем новую функцию и берем первую группу
-    groups = get_schedule_for_class_all_positions(class_name)
-    
-    if not groups:
-        return None
-    
-    # Преобразуем в старый формат
-    old_format_lessons = []
-    for lesson in groups[0]['lessons']:
-        old_format_lessons.append({
-            'time': lesson['time'],
-            'data': lesson['raw_data']
-        })
-    
-    return old_format_lessons
-
-def format_schedule_for_telegram(class_name, lessons):
-    """Форматирует расписание для Telegram (старый формат)"""
-    if not lessons:
-        return f"📭 Нет уроков для класса {escape_markdown(class_name)}"
-    
-    message = f"📚 *Расписание для класса {escape_markdown(class_name)}:*\n\n"
-    
-    for i, lesson in enumerate(lessons, 1):
-        message += f"*{i}\\. {escape_markdown(lesson['time'])}*\n"
-        
-        # Первая строка: предмет (если есть)
-        if len(lesson['data']) >= 1 and lesson['data'][0]:
-            message += f"   📖 {escape_markdown(lesson['data'][0])}\n"
-        
-        # Вторая строка: учитель (если есть)
-        if len(lesson['data']) >= 2 and lesson['data'][1]:
-            message += f"   👨‍🏫 {escape_markdown(lesson['data'][1])}\n"
-        
-        # Третья строка: кабинет (если есть)
-        if len(lesson['data']) >= 3 and lesson['data'][2]:
-            message += f"   🏫 {escape_markdown(lesson['data'][2])}\n"
-        
-        message += "\n"
-    
-    return message
-
-def format_schedule_for_console(class_name, lessons):
-    """Форматирует расписание для консоли (старый формат)"""
-    if not lessons:
-        return f"📭 Нет уроков для класса {class_name}"
-    
-    message = f"\n{'='*60}\nРАСПИСАНИЕ ДЛЯ КЛАССА '{class_name}':\n{'='*60}\n"
-    
-    if lessons:
-        message += f"\n📚 Найдено уроков: {len(lessons)}\n\n"
-        for i, lesson in enumerate(lessons, 1):
-            message += f"{i}. {lesson['time']}\n"
-            if len(lesson['data']) >= 1 and lesson['data'][0]:
-                message += f"   📖 {lesson['data'][0]}\n"
-            if len(lesson['data']) >= 2 and lesson['data'][1]:
-                message += f"   👨‍🏫 {lesson['data'][1]}\n"
-            if len(lesson['data']) >= 3 and lesson['data'][2]:
-                message += f"   🏫 {lesson['data'][2]}\n"
-            message += "\n"
-    else:
-        message += "\n📭 Нет уроков на сегодня"
-    
-    return message
+# ====== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======
 
 def get_available_classes():
-    """Получает список доступных классов"""
+    """Получает список всех доступных классов"""
+    lines = read_schedule_file()
     classes = set()
     
     for line in lines:
         cells = line.strip().split(',')
         for cell in cells:
             cell_clean = cell.strip()
-            if re.match(r'^\d+\s*[А-ЯA-Z]$', cell_clean, re.IGNORECASE):
+            if re.match(r'^\d+\s*[А-ЯA-Z](\s*[А-ЯA-Z])?$', cell_clean, re.IGNORECASE):
                 classes.add(cell_clean)
     
-    return sorted(list(classes), key=lambda x: (int(re.search(r'\d+', x).group()), x))
-
-def reload_schedule():
-    """Перезагружает расписание из файла"""
-    global lines
-    lines = read_schedule_file()
-    
-    # Сбрасываем кэш
-    global _teacher_index_cache, _teacher_index_cache_time
-    global _document_structure_cache, _document_structure_cache_time
-    _teacher_index_cache = None
-    _teacher_index_cache_time = None
-    _document_structure_cache = None
-    _document_structure_cache_time = None
-    
-    return lines
+    return sorted(list(classes), key=lambda x: (
+        int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 999,
+        x
+    ))
 
 def has_schedule_file():
     """Проверяет наличие файла расписания"""
@@ -775,3 +540,103 @@ def has_schedule_file():
             return True
     except FileNotFoundError:
         return False
+
+# ====== КОМПАТИБИЛЬНОСТЬ С СТАРЫМ КОДОМ ======
+
+def get_schedule_for_class_all_positions(class_name):
+    """Совместимость со старым кодом"""
+    return get_schedule_for_class(class_name)
+
+def format_class_schedule_groups(class_name, groups):
+    """Совместимость со старым кодом"""
+    return format_class_schedule(class_name, groups)
+
+def get_schedule_by_teacher(teacher_name):
+    """Совместимость со старым кодом"""
+    schedule_by_day = get_teacher_schedule(teacher_name)
+    if not schedule_by_day:
+        return None
+    
+    total_lessons = sum(len(lessons) for lessons in schedule_by_day.values())
+    groups = []
+    
+    for day, lessons in schedule_by_day.items():
+        groups.append({
+            'day': day,
+            'shift': '1_смена',  # Заглушка
+            'lessons': lessons,
+            'total_lessons': len(lessons)
+        })
+    
+    return {
+        'teacher': teacher_name,
+        'found_as': teacher_name,
+        'match_type': 'exact',
+        'groups': groups,
+        'total_lessons': total_lessons
+    }
+
+def format_teacher_schedule_old(teacher_info):
+    """Совместимость со старым кодом"""
+    if not teacher_info:
+        return "❌ Учитель не найден"
+    
+    teacher_name = teacher_info['teacher']
+    schedule_by_day = {}
+    
+    for group in teacher_info['groups']:
+        day = group['day']
+        if day not in schedule_by_day:
+            schedule_by_day[day] = []
+        schedule_by_day[day].extend(group['lessons'])
+    
+    return format_teacher_schedule(teacher_name, schedule_by_day)
+
+# ====== КЭШ ДЛЯ ПРОИЗВОДИТЕЛЬНОСТИ ======
+_teacher_index_cache = None
+
+def get_cached_teacher_index():
+    """Совместимость со старым кодом"""
+    global _teacher_index_cache
+    if _teacher_index_cache is None:
+        _teacher_index_cache = {}
+        all_lessons = get_all_lessons()
+        
+        for lesson in all_lessons:
+            teacher_field = lesson['teacher']
+            if not teacher_field:
+                continue
+            
+            teacher_parts = split_by_slash(teacher_field)
+            for teacher in teacher_parts:
+                if teacher not in _teacher_index_cache:
+                    _teacher_index_cache[teacher] = []
+                _teacher_index_cache[teacher].append(lesson)
+    
+    return _teacher_index_cache
+
+def reload_schedule():
+    """Перезагружает расписание"""
+    global _teacher_index_cache
+    _teacher_index_cache = None
+    return True
+
+# ====== ЭКСПОРТ ФУНКЦИЙ ======
+__all__ = [
+    'escape_markdown',
+    'get_schedule_for_class',
+    'get_schedule_for_class_all_positions',
+    'format_class_schedule',
+    'format_class_schedule_groups',
+    'get_teacher_schedule',
+    'get_schedule_by_teacher',
+    'format_teacher_schedule',
+    'format_teacher_schedule_old',
+    'search_teachers_by_substring',
+    'get_available_classes',
+    'has_schedule_file',
+    'get_cached_teacher_index',
+    'reload_schedule',
+    'get_room_schedule',
+    'format_room_schedule'
+]
