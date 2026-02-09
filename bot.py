@@ -5,6 +5,7 @@ import sys
 import logging
 import time
 import re
+from dotenv import load_dotenv
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,66 +24,42 @@ user_states = {}  # Словарь для хранения состояний п
 def load_config():
     """Безопасная загрузка конфигурации"""
     config = {
-        'TELEGRAM_BOT_TOKEN': None,
-        'ADMIN_IDS': []
+        'BOT_TOKEN': None
     }
-    
-    # ПРИОРИТЕТ 1: Переменные окружения Railway
-    token_from_env = os.getenv('TELEGRAM_BOT_TOKEN')
+    load_dotenv()
+    # ПРИОРИТЕТ 1: Переменные окружения BotHost
+    token_from_env = os.getenv('BOT_TOKEN')
     if token_from_env:
-        config['TELEGRAM_BOT_TOKEN'] = token_from_env
-        logger.info("✅ Токен загружен из переменных окружения Railway")
+        config['BOT_TOKEN'] = token_from_env
+        logger.info("✅ Токен загружен из переменных окружения BotHost")
     
-    # ID администраторов из переменных окружения
-    admin_ids_env = os.getenv('ADMIN_IDS')
-    if admin_ids_env:
-        try:
-            config['ADMIN_IDS'] = [int(id.strip()) for id in admin_ids_env.split(',') if id.strip()]
-            logger.info(f"✅ ID администраторов из переменных окружения: {len(config['ADMIN_IDS'])}")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось распарсить ADMIN_IDS: {e}")
     
-    # ПРИОРИТЕТ 2: Файл config.py (только если в окружении нет токена)
-    if not config['TELEGRAM_BOT_TOKEN']:
-        try:
-            if os.path.exists('config.py'):
-                from config import TELEGRAM_BOT_TOKEN, ADMIN_IDS
-                config['TELEGRAM_BOT_TOKEN'] = TELEGRAM_BOT_TOKEN
-                if ADMIN_IDS:
-                    config['ADMIN_IDS'].extend([id for id in ADMIN_IDS if id not in config['ADMIN_IDS']])
-                logger.info("✅ Конфиг загружен из config.py")
-            else:
-                logger.warning("⚠️ Файл config.py не найден")
-        except ImportError as e:
-            logger.error(f"❌ Ошибка импорта config.py: {e}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки config.py: {e}")
+    # ПРИОРИТЕТ 2: Переменные окружения общие
+    if not config['BOT_TOKEN']:
+        token_from_env = os.getenv('BOT_TOKEN')
+        if token_from_env:
+            config['BOT_TOKEN'] = token_from_env
+            logger.info("✅ Токен загружен из переменной TOKEN")
     
     return config
 
 # Загружаем конфигурацию
 config = load_config()
-TELEGRAM_BOT_TOKEN = config['TELEGRAM_BOT_TOKEN']
-ADMIN_IDS = config['ADMIN_IDS']
+BOT_TOKEN = config['BOT_TOKEN']
 
 # Проверяем токен
-if not TELEGRAM_BOT_TOKEN:
+if not BOT_TOKEN:
     logger.error("❌ Токен не найден!")
     logger.error("\n💡 СПОСОБЫ УКАЗАТЬ ТОКЕН:")
-    logger.error("1. НА RAILWAY: Установите переменную окружения TELEGRAM_BOT_TOKEN")
-    logger.error("2. ЛОКАЛЬНО: Создайте файл config.py с содержанием:")
-    logger.error("   TELEGRAM_BOT_TOKEN = 'ваш_токен_бота'")
-    logger.error("   ADMIN_IDS = [ваш_id_телеграм]")
+    logger.error("1. НА BOTHOST: Установите переменную окружения BOT_TOKEN")
+    logger.error("2. В настройках бота BotHost: Добавьте переменную BOT_TOKEN")
+    logger.error("3. АЛЬТЕРНАТИВНЫЕ ИМЕНА: BOT_TOKEN или TOKEN")
     sys.exit(1)
 
-logger.info(f"✅ Токен получен (первые 10 символов): {TELEGRAM_BOT_TOKEN[:10]}...")
-if ADMIN_IDS:
-    logger.info(f"✅ Администраторы: {len(ADMIN_IDS)} пользователей")
-else:
-    logger.warning("⚠️ ADMIN_IDS не установлены - команды администратора будут недоступны")
+logger.info(f"✅ Токен получен (первые 10 символов): {BOT_TOKEN[:10]}...")
 
 # Создаем бота
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # ====== БЕЗОПАСНАЯ ЗАГРУЗКА МОДУЛЕЙ ======
 def safe_import_modules():
@@ -237,10 +214,6 @@ def send_welcome(message):
 @bot.message_handler(commands=['update'])
 def update_command(message):
     """Обновление расписания"""
-    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ Эта команда доступна только администраторам\\.")
-        return
-    
     clear_user_state(message.chat.id)
     
     bot.send_message(
@@ -400,10 +373,10 @@ def about_command(message):
         "Тестирование показало хорошие результаты работы\n\n"
         "🔧 *Техническая информация:*\n"
         "• Данные обновляются командой /update\n"
-        "• Работает на платформе Railway\n"
+        "• Работает на платформе BotHost\n"
         "• Исходный код: закрытый\n\n"
         "📞 *Поддержка:*\n"
-        "По вопросам работы бота обращайтесь к администратору\\."
+        "По вопросам работы бота обращайтесь к разработчику\\."
     )
     
     bot.send_message(
@@ -564,7 +537,7 @@ def handle_help_button(message):
         "1\\. Попробуйте обновить данные \\(/update\\)\n"
         "2\\. Проверьте написание класса/фамилии/номера\n"
         "3\\. Используйте поиск по части фамилии для учителей\n"
-        "4\\. Обратитесь к администратору\n\n"
+        "4\\. Обратитесь к разработчику\n\n"
         
         "💡 *Быстрые команды:*\n"
         "/start \\- главное меню\n"
@@ -690,7 +663,7 @@ def handle_text(message):
             "💡 *Попробуйте:*\n"
             "1\\. Проверить написание\n"
             "2\\. Обновить расписание /update\n"
-            "3\\. Обратиться к администратору",
+            "3\\. Обратиться к разработчику",
             parse_mode='MarkdownV2',
             reply_markup=create_main_keyboard()
         )
@@ -904,6 +877,11 @@ def main():
         else:
             logger.info("📭 Файл расписания не найден")
             logger.info("ℹ️  Используйте /update в боте для загрузки")
+    
+    # На BotHost обычно используют webhook, но polling тоже работает
+    # Настраиваем для работы с BotHost
+    logger.info("🚀 Бот запущен на платформе BotHost")
+    logger.info("📱 Режим: Long Polling")
     
     while True:
         try:
