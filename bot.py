@@ -406,12 +406,16 @@ def stats_command(message):
             file_size = os.path.getsize('school_schedule.csv')
             file_info = f"Размер файла: {file_size} байт\n"
         
+        # Экранируем дату отдельно
+        last_update = time.strftime('%d.%m.%Y %H:%M')
+        escaped_update = last_update.replace('.', r'\.')
+        
         stats_text = (
             f"📊 *Статистика бота:*\n\n"
             f"📋 *Классы:* {len(classes) if classes else 0}\n"
             f"👨‍🏫 *Учителя:* {len(teacher_index) if teacher_index else 0}\n"
             f"{file_info}"
-            f"🔄 *Последнее обновление:* {time.strftime('%d\\.%m\\.%Y %H:%M')}\n\n"
+            f"🔄 *Последнее обновление:* {escaped_update}\n\n"
             f"✅ *Статус:* {'Работает нормально' if file_exists else 'Требуется обновление'}\n\n"
             f"💡 Используйте /update для обновления данных"
         )
